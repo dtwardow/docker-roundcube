@@ -1,37 +1,46 @@
-FROM marvambass/nginx-ssl-php
-MAINTAINER MarvAmBass
+FROM php:5-apache
+MAINTAINER Dennis Twardowsky <twardowsky@gmail.com>
 
-ENV DH_SIZE 1024
+ENV WWW_DIR /var/www/html
+ENV DATA_DIR /data
+ENV SCRIPTS_DIR /opt/scripts
 
-RUN apt-get update; apt-get install -y \
-    wget \
-    php5-intl \
-    php5-mcrypt \
-    php5-mysql \
-    mysql-client
-
-# enable php5 mcrypt
-RUN php5enmod mcrypt
+RUN apt-get update && \
+    apt-get -y install wget sudo gettext-base sqlite3 && \
+    apt-get install -y \
+        libfreetype6-dev \
+        libjpeg62-turbo-dev \
+        libmcrypt-dev \
+        libpng12-dev \
+        libmysqlclient-dev \
+        libsqlite3-dev \
+    && docker-php-ext-install -j$(nproc) iconv mcrypt \
+    && docker-php-ext-configure gd --with-freetype-dir=/usr/include/ --with-jpeg-dir=/usr/include/ \
+    && docker-php-ext-install -j$(nproc) gd \
+    && docker-php-ext-install mysql && \
+    apt-get clean
 
 # install roundcube
 RUN wget "http://sourceforge.net/projects/roundcubemail/files/latest/download" -O roundcubemail.tar.gz && \
     tar xvf roundcubemail.tar.gz -C / && \
     rm roundcubemail.tar.gz; \
-    mv /roundcube* /roundcube
+    mv /roundcube* /roundcube && \
+    mv /roundcube/* ${WWW_DIR}
 
 # fix rights
-RUN chmod a+rw /roundcube/temp/; \
-    chmod a+rw /roundcube/logs/
+RUN chmod a+rw ${WWW_DIR}/temp/; \
+    chmod a+rw ${WWW_DIR}/logs/
 
 # add config
-ADD config.inc.php /roundcube/config/config.inc.php
+ADD assets/conf/* /opt/config/
+ADD assets/scripts/* ${SCRIPTS_DIR}/
+ADD assets/www/* ${WWW_DIR}/
+RUN chmod -R u+x ${SCRIPTS_DIR}
 
-# install nginx roundcube config
-ADD nginx-roundcube.conf /etc/nginx/conf.d/nginx-roundcube.conf
+VOLUME ["${DATA_DIR}"]
 
-# add startup.sh
-ADD startup-roundcube.sh /opt/startup-roundcube.sh
-RUN chmod a+x /opt/startup-roundcube.sh
+EXPOSE 80
 
-# add '/opt/startup-roundcube.sh' to entrypoint.sh
-RUN sed -i 's/# exec CMD/# exec CMD\n\/opt\/startup-roundcube.sh/g' /opt/entrypoint.sh
+ENTRYPOINT ["/opt/scripts/entrypoint.sh"]
+CMD ["app:start"]
+

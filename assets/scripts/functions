@@ -1,0 +1,211 @@
+#!/bin/bash
+set -e
+source ${SCRIPTS_DIR}/env-defaults
+
+FILE_SQLITE_DB=${DATA_DIR}/roundcube.db
+FILE_CONFIG=/opt/config/config.inc.php
+FILE_CONFIG_WWW=${WWW_DIR}/config/config.inc.php
+
+## Replace placeholders with values
+# $1: file with placeholders to replace
+# $x: placeholders to replace
+update_template() {
+  local FILE=${1?missing argument}
+  shift
+
+  [[ ! -f ${FILE} ]] && return 1
+
+  local VARIABLES=($@)
+  local USR=$(stat -c %U ${FILE})
+  local tmp_file=$(mktemp)
+  cp -a "${FILE}" ${tmp_file}
+
+  local variable
+  for variable in ${VARIABLES[@]}; do
+    # Keep the compatibilty: {{VAR}} => ${VAR}
+    sed -ri "s/[{]{2}$variable[}]{2}/\${$variable}/g" ${tmp_file}
+  done
+
+  # Replace placeholders
+  (
+    export ${VARIABLES[@]}
+    local IFS=":"; sudo -HEu ${USR} envsubst "${VARIABLES[*]/#/$}" < ${tmp_file} > ${FILE}
+  )
+  rm -f ${tmp_file}
+}
+
+finalize_database_parameters() {
+  # is a mysql or postgresql database linked?
+  # requires that the mysql or postgresql containers have exposed
+  # port 3306 and 5432 respectively.
+  if [[ -n ${MYSQL_PORT_3306_TCP_ADDR} ]]; then
+    DB_TYPE=${DB_TYPE:-mysql}
+    DB_HOST=${DB_HOST:-${MYSQL_PORT_3306_TCP_ADDR}}
+    DB_PORT=${DB_PORT:-${MYSQL_PORT_3306_TCP_PORT}}
+
+    # support for linked sameersbn/mysql image
+    DB_USER=${DB_USER:-${MYSQL_ENV_DB_USER}}
+    DB_PASS=${DB_PASS:-${MYSQL_ENV_DB_PASS}}
+    DB_NAME=${DB_NAME:-${MYSQL_ENV_DB_NAME}}
+
+    # support for linked orchardup/mysql and enturylink/mysql image
+    # also supports official mysql image
+    DB_USER=${DB_USER:-${MYSQL_ENV_MYSQL_USER}}
+    DB_PASS=${DB_PASS:-${MYSQL_ENV_MYSQL_PASSWORD}}
+    DB_NAME=${DB_NAME:-${MYSQL_ENV_MYSQL_DATABASE}}
+  elif [[ -n ${POSTGRESQL_PORT_5432_TCP_ADDR} ]]; then
+    DB_TYPE=${DB_TYPE:-postgresql}
+    DB_HOST=${DB_HOST:-${POSTGRESQL_PORT_5432_TCP_ADDR}}
+    DB_PORT=${DB_PORT:-${POSTGRESQL_PORT_5432_TCP_PORT}}
+
+    # support for linked official postgres image
+    DB_USER=${DB_USER:-${POSTGRESQL_ENV_POSTGRES_USER}}
+    DB_PASS=${DB_PASS:-${POSTGRESQL_ENV_POSTGRES_PASSWORD}}
+    DB_NAME=${DB_NAME:-${POSTGRESQL_ENV_POSTGRES_DB}}
+    DB_NAME=${DB_NAME:-${POSTGRESQL_ENV_POSTGRES_USER}}
+
+    # support for linked sameersbn/postgresql image
+    DB_USER=${DB_USER:-${POSTGRESQL_ENV_DB_USER}}
+    DB_PASS=${DB_PASS:-${POSTGRESQL_ENV_DB_PASS}}
+    DB_NAME=${DB_NAME:-${POSTGRESQL_ENV_DB_NAME}}
+
+    # support for linked orchardup/postgresql image
+    DB_USER=${DB_USER:-${POSTGRESQL_ENV_POSTGRESQL_USER}}
+    DB_PASS=${DB_PASS:-${POSTGRESQL_ENV_POSTGRESQL_PASS}}
+    DB_NAME=${DB_NAME:-${POSTGRESQL_ENV_POSTGRESQL_DB}}
+
+    # support for linked paintedfox/postgresql image
+    DB_USER=${DB_USER:-${POSTGRESQL_ENV_USER}}
+    DB_PASS=${DB_PASS:-${POSTGRESQL_ENV_PASS}}
+    DB_NAME=${DB_NAME:-${POSTGRESQL_ENV_DB}}
+  fi
+
+  # set default port number if not specified
+  DB_TYPE=${DB_TYPE:-sqlite}
+
+  # set default user and database
+  DB_USER=${DB_USER:-root}
+  DB_NAME=${DB_NAME:-mail}
+
+  case ${DB_TYPE} in
+    mysql)
+      DB_PORT=${DB_PORT:-3306}
+      DB_DRIVER="mysql"
+      DB_DSNW="${DB_DRIVER}://${DB_USER}:${DB_PASS}@${DB_HOST}/${DB_NAME}"
+      ;;
+    postgresql)
+      DB_PORT=${DB_PORT:-5432}
+      DB_DRIVER="pgsql"
+      DB_DSNW="${DB_DRIVER}://${DB_USER}:${DB_PASS}@${DB_HOST}/${DB_NAME}"
+      ;;
+    sqlite)
+      DB_PORT=0
+      DB_DRIVER="sqlite"
+      DB_DSNW="${DB_DRIVER}:///${FILE_SQLITE_DB}?mode=0646"
+      ;;
+    *)
+      echo
+      echo "ERROR: "
+      echo "  Please specify the database type in use via the DB_TYPE configuration option."
+      echo "  Accepted values are \"postgresql\" or \"mysql\". Aborting..."
+      echo
+      return 1
+      ;;
+  esac
+
+}
+
+check_database_connection() {
+  case ${DB_TYPE} in
+    mysql)
+      prog="mysqladmin -h ${DB_HOST} -P ${DB_PORT} -u ${DB_USER} ${DB_PASS:+-p$DB_PASS} status"
+      ;;
+    postgresql)
+      prog=$(find /usr/lib/postgresql/ -name pg_isready)
+      prog="${prog} -h ${DB_HOST} -p ${DB_PORT} -U ${DB_USER} -d ${DB_NAME} -t 1"
+      ;;
+    sqlite)
+      echo "DB-Backend SQLITE used. No wait for database necessary"
+      if [ ! -f ${FILE_SQLITE_DB} ]; then
+        touch ${FILE_SQLITE_DB}
+        chown www-data:www-data ${FILE_SQLITE_DB}
+      fi
+      return 0;
+      ;;
+  esac
+  timeout=60
+  while ! ${prog} >/dev/null 2>&1
+  do
+    timeout=$(expr $timeout - 1)
+    if [[ $timeout -eq 0 ]]; then
+      echo
+      echo "Could not connect to database server. Aborting..."
+      return 1
+    fi
+    echo -n "."
+    sleep 1
+  done
+  echo
+}
+
+configure_webserver() {
+  cp ${FILE_CONFIG} ${FILE_CONFIG_WWW}
+  chown www-data:www-data ${FILE_CONFIG_WWW}
+
+  if [[ -n ${IMAP_PROTOCOL} ]]; then
+    IMAP_PROTOCOL=${IMAP_PROTOCOL}://
+  fi
+
+  if [[ -n ${SMTP_PROTOCOL} ]]; then
+    SMTP_PROTOCOL=${SMTP_PROTOCOL}://
+  fi
+
+  if [[ -n ${SIEVE_PROTOCOL} ]]; then
+    SIEVE_PROTOCOL=${SIEVE_PROTOCOL}://
+  fi
+
+  update_template ${FILE_CONFIG_WWW} \
+    DEBUG_LEVEL \
+    IMAP_PROTOCOL \
+    IMAP_HOST \
+    IMAP_PORT \
+    SMTP_PROTOCOL \
+    SMTP_HOST \
+    SMTP_PORT \
+    SIEVE_PROTOCOL \
+    SIEVE_HOST \
+    SIEVE_PORT \
+    DB_DSNW \
+    ENC_KEY \
+    INSTALLER_ENABLED \
+    UI_LANG
+
+  chown -R www-data:www-data ${DATA_DIR}
+}
+
+configure_timezone() {
+  sed -i "s!;date.timezone =.*!date.timezone = ${TIMEZONE}!g" /etc/php5/fpm/php.ini
+}
+
+init_roundcube() {
+  if [ ${INSTALLER_ENABLED} == "true" ]; then
+    echo ">>> Start (temporary) Webserver"
+    apachectl start
+    sleep 2
+
+    echo ">>> Iniitalize Roundcube Mail"
+    wget -O ${DATA_DIR}/init.log --no-check-certificate --no-proxy --post-data 'initdb=Initialize+database' http://localhost/installer/index.php?_step=3
+
+    echo ">>> Remove Roundcube Installer"
+    rm -rf ${WWW_DIR}/installer
+  
+    echo ">>> Stop (temporary) Webserver"
+    apachectl -k stop
+    sleep 1
+  else
+    echo "Already Initilized -> SKIP"
+  fi
+
+  ROUNDCUBE_RANDOM=`perl -e 'my @chars = ("A".."Z", "a".."z"); my $string; $string .= $chars[rand @chars] for 1..24; print $string;'` # returns exactly 24 random chars
+}
+
