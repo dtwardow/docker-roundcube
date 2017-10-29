@@ -116,6 +116,7 @@ This is done with the option `-v /local/data/dir:/data` when starting the contai
   - `ENC_KEY` (default: a 24 digit secret)
   - `UI_LANG` (default: de_DE)
   - `DEBUG_LEVEL` (default: 1)
+  - `TIMEZONE` (default: "UTC")
 
 ## Startup ##
 
