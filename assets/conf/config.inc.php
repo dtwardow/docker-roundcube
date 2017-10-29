@@ -55,4 +55,6 @@ $config['managesieve_conn_options'] = array(
   ),
 );
 
+ini_set('date.timezone', '{{TIMEZONE}}');
+
 ?>

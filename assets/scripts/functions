@@ -178,7 +178,8 @@ configure_webserver() {
     DB_DSNW \
     ENC_KEY \
     INSTALLER_ENABLED \
-    UI_LANG
+    UI_LANG \
+    TIMEZONE
 
   chown -R www-data:www-data ${DATA_DIR}
 }
